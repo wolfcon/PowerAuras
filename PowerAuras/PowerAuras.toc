@@ -6,7 +6,7 @@
 ## Notes-frFR: Affiche des effets visuels autour du personnage.
 ## DefaultState: Enabled
 ## SavedVariables: PowaGlobalSet, PowaGlobalListe, PowaGlobalMisc
-## SavedVariablesPerCharacter: PowaSet, PowaMisc, PowaTimer, PowaPlayerListe, PowaState
+## SavedVariablesPerCharacter: PowaSet, PowaMisc, PowaTimer, PowaPlayerListe, PowaState, PowaBuffDurationDB
 
 PowerAurasBase.lua
 PowerAurasLocalizations.lua
