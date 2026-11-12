@@ -1691,11 +1691,104 @@ end
 
 PowaAuras.BuffCache = PowaAuras.BuffCache or {}
 
--- Cache one successfully read AuraData.
-function cPowaBuffBase:CacheAura(unit, auraData, tooltipMatched)
-    if not auraData or not auraData.spellId then
+-- Persistent per-character learning database.
+-- auras[auraSpellID] stores data learned from a readable (out-of-combat) AuraData.
+-- spells[castSpellID][auraSpellID] stores the observed cast -> aura relationship.
+local function GetBuffDurationDB()
+    PowaBuffDurationDB = PowaBuffDurationDB or {}
+    PowaBuffDurationDB.auras = PowaBuffDurationDB.auras or {}
+    PowaBuffDurationDB.spells = PowaBuffDurationDB.spells or {}
+    return PowaBuffDurationDB
+end
+
+local function AddSpellAuraMapping(castSpellID, auraSpellID)
+    if type(castSpellID) ~= "number" or type(auraSpellID) ~= "number" then
         return
     end
+
+    local db = GetBuffDurationDB()
+    local mappings = db.spells[castSpellID]
+    if not mappings then
+        mappings = {}
+        db.spells[castSpellID] = mappings
+    end
+    mappings[auraSpellID] = true
+end
+
+-- Learn duration only while AuraData is readable and the aura is player-owned.
+function PowaAuras:LearnBuffAura(spellID, name, icon, duration, isMine, changed)
+    if self.WeAreInCombat or not isMine then
+        return
+    end
+    if type(spellID) ~= "number" or type(duration) ~= "number" or duration < 0 then
+        return
+    end
+
+    local db = GetBuffDurationDB()
+    db.auras[spellID] = {
+        spellId = spellID,
+        name = name,
+        icon = icon,
+        duration = duration,
+        learnedAt = GetTime(),
+    }
+
+    -- Correlate a newly observed/refreshed player aura with the most recent
+    -- successful player cast. UNIT_AURA may be processed before or after the
+    -- cast event, so RefreshBuffCache also checks recently changed cache rows.
+    local cast = self.LastBuffLearningCast
+    if changed and cast and type(cast.spellID) == "number"
+        and GetTime() - cast.time <= 3 then
+        AddSpellAuraMapping(cast.spellID, spellID)
+        self.LastBuffLearningCast = nil
+    end
+end
+
+function PowaAuras:LearnSpellAuraFromRecentCache(castSpellID)
+    if self.WeAreInCombat or type(castSpellID) ~= "number" then
+        return
+    end
+
+    local unitCache = self.BuffCache and self.BuffCache.player
+    if not unitCache then
+        return
+    end
+
+    local now = GetTime()
+    local matched = false
+    for auraSpellID, aura in pairs(unitCache) do
+        if aura.isMine and aura.lastChanged
+            and now - aura.lastChanged <= 3 then
+            AddSpellAuraMapping(castSpellID, tonumber(auraSpellID) or auraSpellID)
+            matched = true
+        end
+    end
+
+    if matched then
+        self.LastBuffLearningCast = nil
+    end
+end
+
+-- Cache one successfully read AuraData.
+function cPowaBuffBase:CacheAura(unit, auraData, tooltipMatched)
+    if not auraData then
+        return
+    end
+
+    local spellID = GetSafeValue(auraData.spellId)
+    if type(spellID) ~= "number" then
+        return
+    end
+
+    local name = GetSafeValue(auraData.name)
+    local icon = GetSafeValue(auraData.icon)
+    local applications = GetSafeValue(auraData.applications)
+    local duration = GetSafeValue(auraData.duration)
+    local expirationTime = GetSafeValue(auraData.expirationTime)
+    local caster = GetSafeValue(auraData.sourceUnit)
+    local isMine = caster ~= nil
+        and UnitExists(caster)
+        and SafeUnitIsUnit("player", caster)
 
     local unitCache = PowaAuras.BuffCache[unit]
     if not unitCache then
@@ -1703,89 +1796,141 @@ function cPowaBuffBase:CacheAura(unit, auraData, tooltipMatched)
         PowaAuras.BuffCache[unit] = unitCache
     end
 
-    local caster = GetSafeValue(auraData.sourceUnit)
-    local isMine = caster ~= nil
-        and UnitExists(caster)
-        and SafeUnitIsUnit("player", caster)
+    local previous = unitCache[spellID]
+    local changed = not previous
+        or previous.expirationTime ~= expirationTime
+        or previous.duration ~= duration
+    local now = GetTime()
 
-    unitCache[auraData.spellId] = {
-        spellId = auraData.spellId,
-        name = auraData.name,
-        icon = auraData.icon,
-        applications = auraData.applications,
-        duration = auraData.duration,
-        expirationTime = auraData.expirationTime,
+    unitCache[spellID] = {
+        spellId = spellID,
+        name = name,
+        icon = icon,
+        applications = applications,
+        duration = duration,
+        expirationTime = expirationTime,
         sourceUnit = caster,
         isMine = isMine,
         tooltipMatched = tooltipMatched ~= false,
-        lastSeen = GetTime(),
+        lastSeen = now,
+        lastChanged = changed and now or (previous and previous.lastChanged),
     }
+
+    -- Learn only the player's own auras. The call is harmless in combat:
+    -- LearnBuffAura explicitly refuses to read/update persistent data there.
+    if unit == "player" and isMine then
+        PowaAuras:LearnBuffAura(
+            spellID,
+            name,
+            icon,
+            duration,
+            isMine,
+            changed
+        )
+    end
 end
 
 function PowaAuras:RefreshBuffCache(unit, castSpellID)
-	if unit ~= "player" or not castSpellID then
-		return
-	end
-	if self.DebugEvents then
-    	self:DisplayText(
-        	"BuffCache CAST: unit=",
-        	unit,
-        	" spellID=",
-        	castSpellID
-    	)
-	end
-	local unitCache = self.BuffCache and self.BuffCache[unit]
-	if not unitCache then
-		return
-	end
+    if unit ~= "player" or type(castSpellID) ~= "number" then
+        return false
+    end
 
-	if self.DebugEvents then
-    	for auraID, aura in pairs(unitCache) do
-    	    self:DisplayText(
-    	        "BuffCache ENTRY: auraID=",
-    	        auraID,
-    	        " name=",
-    	        aura.name,
-    	        " duration=",
-    	        aura.duration
-    	    )
-    	end
-	end
+    if self.DebugEvents then
+        self:DisplayText(
+            "BuffCache CAST: unit=",
+            unit,
+            " spellID=",
+            castSpellID
+        )
+    end
 
-	-- 默认施法技能 ID 与 Aura spellId 相同。
-	local auraSpellID = castSpellID
+    -- Handle event ordering where UNIT_AURA was processed just before
+    -- UNIT_SPELLCAST_SUCCEEDED.
+    if not self.WeAreInCombat then
+        self:LearnSpellAuraFromRecentCache(castSpellID)
+    end
 
-	-- 如果施法技能 ID 与 Aura spellId 不同，
-	-- 可以通过映射表指定对应关系。
-	if self.BuffCacheRefreshSpellMap then
-		auraSpellID = self.BuffCacheRefreshSpellMap[castSpellID] or auraSpellID
-	end
+    local unitCache = self.BuffCache and self.BuffCache[unit]
+    if not unitCache then
+        unitCache = {}
+        self.BuffCache[unit] = unitCache
+    end
 
-	local cachedAura = unitCache[auraSpellID]
-	if not cachedAura then
-		return
-	end
+    local db = GetBuffDurationDB()
+    local mappings = db.spells[castSpellID]
+    local auraIDs = {}
 
-	-- 永久 Aura 或未知持续时间，不人为创建倒计时。
-	local duration = cachedAura.duration
-	if type(duration) ~= "number" or duration <= 0 then
-		return
-	end
+    if mappings then
+        for auraSpellID in pairs(mappings) do
+            auraIDs[#auraIDs + 1] = tonumber(auraSpellID) or auraSpellID
+        end
+    elseif db.auras[castSpellID] then
+        -- Common case: cast spell ID and aura spell ID are identical.
+        auraIDs[1] = castSpellID
+    end
 
-	local now = GetTime()
+    if #auraIDs == 0 then
+        if self.DebugEvents then
+            self:DisplayText("BuffCache: no learned aura mapping for spellID=", castSpellID)
+        end
+        return false
+    end
 
-	cachedAura.expirationTime = now + duration
-	cachedAura.lastRefresh = now
+    local now = GetTime()
+    local created = false
 
-	if self.DebugEvents then
-		self:DisplayText(
-			"BuffCache REFRESH: ", cachedAura.name,
-			" spellId=", cachedAura.spellId,
-			" castSpellID=", castSpellID,
-			" duration=", duration,
-			" expiration=", cachedAura.expirationTime
-		)
-	end
+    for _, auraSpellID in ipairs(auraIDs) do
+        local learned = db.auras[auraSpellID]
+        if learned and type(learned.duration) == "number" then
+            local cachedAura = unitCache[auraSpellID]
+            if not cachedAura then
+                cachedAura = {
+                    spellId = auraSpellID,
+                    name = learned.name,
+                    icon = learned.icon,
+                    applications = 1,
+                    sourceUnit = "player",
+                    isMine = true,
+                    tooltipMatched = true,
+                }
+                unitCache[auraSpellID] = cachedAura
+                created = true
+            end
+
+            cachedAura.name = learned.name or cachedAura.name
+            cachedAura.icon = learned.icon or cachedAura.icon
+            cachedAura.duration = learned.duration
+            cachedAura.applications = cachedAura.applications or 1
+            cachedAura.sourceUnit = "player"
+            cachedAura.isMine = true
+            cachedAura.tooltipMatched = true
+            cachedAura.expirationTime = learned.duration > 0
+                and (now + learned.duration)
+                or 0
+            cachedAura.lastRefresh = now
+            cachedAura.lastSeen = now
+            cachedAura.lastChanged = now
+            cachedAura.source = "SPELLCAST"
+            cachedAura.pending = true
+
+            if self.DebugEvents then
+                self:DisplayText(
+                    "BuffCache LEARNED CAST: castSpellID=", castSpellID,
+                    " auraSpellID=", auraSpellID,
+                    " name=", tostring(cachedAura.name),
+                    " duration=", learned.duration,
+                    " expiration=", cachedAura.expirationTime
+                )
+            end
+        end
+    end
+
+    if created or #auraIDs > 0 then
+        self.DoCheck.All = true
+        self.DoCheck.CheckIt = true
+    end
+
+    return true
 end
 
 function cPowaBuffBase:CheckSecretAuraPresence(unit, s, giveReason, textToCheck)
