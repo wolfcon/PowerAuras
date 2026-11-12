@@ -1738,9 +1738,10 @@ function PowaAuras:LearnBuffAura(spellID, name, icon, duration, isMine, changed)
     -- cast event, so RefreshBuffCache also checks recently changed cache rows.
     local cast = self.LastBuffLearningCast
     if changed and cast and type(cast.spellID) == "number"
-        and GetTime() - cast.time <= 3 then
+        and GetTime() - cast.time <= 1 then
+        -- Keep the short correlation window open: one cast can apply more
+        -- than one configured player aura.
         AddSpellAuraMapping(cast.spellID, spellID)
-        self.LastBuffLearningCast = nil
     end
 end
 
@@ -1755,17 +1756,22 @@ function PowaAuras:LearnSpellAuraFromRecentCache(castSpellID)
     end
 
     local now = GetTime()
-    local matched = false
+    local candidate
+    local candidateCount = 0
+
+    -- UNIT_AURA can precede UNIT_SPELLCAST_SUCCEEDED. Only infer the mapping
+    -- when exactly one configured player aura changed in the very short
+    -- pre-event window; otherwise the relationship is ambiguous.
     for auraSpellID, aura in pairs(unitCache) do
         if aura.isMine and aura.lastChanged
-            and now - aura.lastChanged <= 3 then
-            AddSpellAuraMapping(castSpellID, tonumber(auraSpellID) or auraSpellID)
-            matched = true
+            and now - aura.lastChanged <= 1 then
+            candidate = tonumber(auraSpellID) or auraSpellID
+            candidateCount = candidateCount + 1
         end
     end
 
-    if matched then
-        self.LastBuffLearningCast = nil
+    if candidateCount == 1 then
+        AddSpellAuraMapping(castSpellID, candidate)
     end
 end
 
