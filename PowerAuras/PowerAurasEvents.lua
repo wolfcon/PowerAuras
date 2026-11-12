@@ -533,9 +533,26 @@ function PowaAuras:UNIT_SPELLCAST_SUCCEEDED(...)
         )
     end
 
-	-- Only process player spell casts for BuffCache
+	-- Only process player spell casts for BuffCache.
+	-- Out of combat, retain the cast briefly so the next readable UNIT_AURA
+	-- scan can learn castSpellID -> auraSpellID. In combat we only consume
+	-- the previously learned SavedVariables database.
 	if unit == "player" then
+		if not self.WeAreInCombat and type(spell) == "number" then
+			self.LastBuffLearningCast = {
+				spellID = spell,
+				time = GetTime(),
+			}
+		end
+
 		self:RefreshBuffCache(unit, spell)
+
+		if not self.WeAreInCombat then
+			-- Ensure an aura applied immediately before this event is scanned
+			-- even if UNIT_AURA was delivered first.
+			self.DoCheck.All = true
+			self.DoCheck.CheckIt = true
+		end
 	end
 
 	self.ExtraUnitEvent[unit] = spell
